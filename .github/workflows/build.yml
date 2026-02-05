@@ -34,7 +34,7 @@ jobs:
 
       - name: Free disk space
         run: |
-          sudo -E apt-get -y purge azure-cli google-cloud-cli hhvm llvm* firefox powershell mono-devel
+          sudo -E apt-get -y purge azure-cli google-cloud-cli llvm* firefox powershell mono-devel || true
           sudo -E apt-get -y autoremove --purge
           sudo -E apt-get clean
           df -h
