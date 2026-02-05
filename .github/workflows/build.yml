@@ -1,1 +1,85 @@
+name: Build ImmortalWrt (26G rootfs + homeproxy/ddns/docker)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/build.yml"
+      - "config/**"
+      - "scripts/**"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo -E apt-get -y purge azure-cli google-cloud-cli hhvm llvm* firefox powershell mono-devel
+          sudo -E apt-get -y autoremove --purge
+          sudo -E apt-get clean
+          df -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses5-dev libssl-dev python3 python3-distutils rsync unzip zlib1g-dev \
+            file wget curl jq
+
+      - name: Clone ImmortalWrt
+        run: |
+          git clone --depth=1 https://github.com/immortalwrt/immortalwrt.git
+          cd immortalwrt
+          echo "IMMORTALWRT_DIR=$PWD" >> $GITHUB_ENV
+
+      - name: Update & install feeds
+        working-directory: ${{ env.IMMORTALWRT_DIR }}
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Apply DIY script
+        working-directory: ${{ env.IMMORTALWRT_DIR }}
+        run: |
+          chmod +x ../scripts/diy.sh
+          ../scripts/diy.sh
+
+      - name: Load config
+        working-directory: ${{ env.IMMORTALWRT_DIR }}
+        run: |
+          cp ../config/immortalwrt-x86_64-26g.config .config
+          make defconfig
+          echo "===== Final .config (key lines) ====="
+          egrep "TARGET_|ROOTFS_PARTSIZE|homeproxy|ddns|docker|dockerd|dockerman|containerd|runc" .config || true
+
+      - name: Download package sources
+        working-directory: ${{ env.IMMORTALWRT_DIR }}
+        run: |
+          make download -j$(nproc)
+          find dl -size -1024c -exec ls -l {} \; || true
+
+      - name: Build firmware
+        working-directory: ${{ env.IMMORTALWRT_DIR }}
+        run: |
+          make -j$(nproc) V=s
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p output
+          cp -r ${{ env.IMMORTALWRT_DIR }}/bin/targets/*/* output/ || true
+          echo "===== Output files ====="
+          find output -maxdepth 3 -type f | sed 's#^#- #'
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: immortalwrt-x86_64-26g
+          path: output
 
