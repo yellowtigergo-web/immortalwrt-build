@@ -2,27 +2,42 @@ name: Build ImmortalWrt (x86_64 rootfs2G + homeproxy/ddns/docker) + Release
 
 on:
   workflow_dispatch:
-    inputs:
-      branch:
-        description: "Choose ImmortalWrt branch"
-        required: true
-        default: "openwrt-23.05"
-        type: choice
-        options:
-          - openwrt-23.05
-          - master
 
 jobs:
   build:
     runs-on: ubuntu-22.04
 
-    # 需要创建 Release / 上传附件
     permissions:
       contents: write
 
     steps:
-      - name: Checkout this repo (workflow/config/scripts)
+      - name: Checkout this repo (workflow/config/build.env)
         uses: actions/checkout@v4
+
+      - name: Load build variables from build.env
+        run: |
+          set -e
+          if [ ! -f "$GITHUB_WORKSPACE/build.env" ]; then
+            echo "ERROR: build.env not found in repo root."
+            exit 1
+          fi
+
+          echo "=== build.env ==="
+          cat "$GITHUB_WORKSPACE/build.env"
+
+          # 导入变量
+          set -a
+          source "$GITHUB_WORKSPACE/build.env"
+          set +a
+
+          # 写入 GITHUB_ENV 供后续 steps 使用
+          echo "IMMORTALWRT_REPO=$IMMORTALWRT_REPO" >> $GITHUB_ENV
+          echo "IMMORTALWRT_BRANCH=$IMMORTALWRT_BRANCH" >> $GITHUB_ENV
+          echo "CONFIG_FILE=$CONFIG_FILE" >> $GITHUB_ENV
+
+          echo "Repo:   $IMMORTALWRT_REPO"
+          echo "Branch: $IMMORTALWRT_BRANCH"
+          echo "Config: $CONFIG_FILE"
 
       - name: Initialization environment (P3TERX style)
         env:
@@ -55,20 +70,17 @@ jobs:
           sudo chown $USER:$GROUPS /workdir
           df -hT
 
-      - name: Clone ImmortalWrt source code to /workdir (branch selectable)
+      - name: Clone ImmortalWrt source code to /workdir (from build.env)
         working-directory: /workdir
         run: |
-          BRANCH="${{ github.event.inputs.branch }}"
-          if [ -z "$BRANCH" ]; then BRANCH="openwrt-23.05"; fi
-          echo "Cloning branch: $BRANCH"
-
-          git clone -b "$BRANCH" --depth=1 https://github.com/immortalwrt/immortalwrt.git immortalwrt
-          ln -sf /workdir/immortalwrt $GITHUB_WORKSPACE/immortalwrt
+          set -e
+          echo "Cloning: $IMMORTALWRT_REPO  branch=$IMMORTALWRT_BRANCH"
+          git clone -b "$IMMORTALWRT_BRANCH" --depth=1 "$IMMORTALWRT_REPO" immortalwrt
+          ln -sf /workdir/immortalwrt "$GITHUB_WORKSPACE/immortalwrt"
 
           echo "IMMORTALWRT_DIR=$GITHUB_WORKSPACE/immortalwrt" >> $GITHUB_ENV
-          echo "IMMORTALWRT_BRANCH=$BRANCH" >> $GITHUB_ENV
 
-          cd $GITHUB_WORKSPACE/immortalwrt
+          cd "$GITHUB_WORKSPACE/immortalwrt"
           git branch --show-current
           git log -1 --oneline
           df -hT .
@@ -81,29 +93,27 @@ jobs:
         working-directory: ${{ env.IMMORTALWRT_DIR }}
         run: ./scripts/feeds install -a
 
-      - name: Apply DIY script (optional)
+      - name: Load config (absolute path + self-check)
         working-directory: ${{ env.IMMORTALWRT_DIR }}
         run: |
-          if [ -f "../scripts/diy.sh" ]; then
-            chmod +x ../scripts/diy.sh
-            ../scripts/diy.sh
-          else
-            echo "No scripts/diy.sh found, skipping."
-          fi
-
-      - name: Load config
-        working-directory: ${{ env.IMMORTALWRT_DIR }}
-        run: |
+          set -e
           echo "PWD=$(pwd)"
           echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+          echo "IMMORTALWRT_DIR=${{ env.IMMORTALWRT_DIR }}"
+          echo "CONFIG_FILE=${{ env.CONFIG_FILE }}"
+
+          echo "=== list workspace root ==="
+          ls -lah "$GITHUB_WORKSPACE" || true
 
           echo "=== list config dir (normal) ==="
           ls -lah "$GITHUB_WORKSPACE/config" || true
+
           echo "=== list config dir (show hidden chars) ==="
           ls -lb "$GITHUB_WORKSPACE/config" || true
-          
-          cp "$GITHUB_WORKSPACE/config/immortalwrt-x86_64-rootfs2g.config" .config
-          
+
+          # 关键：用绝对路径复制，不再依赖 ../
+          cp "$GITHUB_WORKSPACE/${{ env.CONFIG_FILE }}" .config
+
           make defconfig
           echo "===== Key config lines ====="
           egrep "TARGET_|ROOTFS_PARTSIZE|homeproxy|sing-box|ddns|docker|dockerman|firewall4|nftables|kmod-tun" .config || true
@@ -115,7 +125,6 @@ jobs:
           find dl -size -1024c -exec ls -l {} \; || true
           find dl -size -1024c -exec rm -f {} \; || true
 
-      # 无 swap、无并发限制：直接 nproc 并行；但仍然保存完整日志
       - name: Compile firmware (capture log + fallback)
         id: compile
         working-directory: ${{ env.IMMORTALWRT_DIR }}
@@ -214,7 +223,3 @@ jobs:
             Includes: LuCI(https), HomeProxy(sing-box), DDNS, Docker/Dockerman
           files: |
             ${{ env.FIRMWARE_DIR }}/*
-
-      - name: Check space usage
-        if: (!cancelled())
-        run: df -hT
