@@ -94,7 +94,16 @@ jobs:
       - name: Load config
         working-directory: ${{ env.IMMORTALWRT_DIR }}
         run: |
-          cp ../config/immortalwrt-x86_64-rootfs2g.config .config
+          echo "PWD=$(pwd)"
+          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+
+          echo "=== list config dir (normal) ==="
+          ls -lah "$GITHUB_WORKSPACE/config" || true
+          echo "=== list config dir (show hidden chars) ==="
+          ls -lb "$GITHUB_WORKSPACE/config" || true
+          
+          cp "$GITHUB_WORKSPACE/config/immortalwrt-x86_64-rootfs2g.config" .config
+          
           make defconfig
           echo "===== Key config lines ====="
           egrep "TARGET_|ROOTFS_PARTSIZE|homeproxy|sing-box|ddns|docker|dockerman|firewall4|nftables|kmod-tun" .config || true
