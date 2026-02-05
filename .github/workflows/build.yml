@@ -12,17 +12,10 @@ on:
           - openwrt-23.05
           - master
 
-#  push:
-#    paths:
-#      - ".github/workflows/build.yml"
-#      - "config/**"
-#      - "scripts/**"
-
 jobs:
   build:
     runs-on: ubuntu-22.04
 
-    # 关键：创建 Release / 上传附件需要写权限
     permissions:
       contents: write
 
@@ -30,6 +23,7 @@ jobs:
       - name: Checkout this repo (workflow/config/scripts)
         uses: actions/checkout@v4
 
+      # P3TERX 风格：直接删大目录 + prune docker，避免 apt purge 找不到包
       - name: Initialization environment (P3TERX style)
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -61,6 +55,16 @@ jobs:
           sudo chown $USER:$GROUPS /workdir
           df -hT
 
+      # 防止 OOM：加 swap
+      - name: Create swap (avoid OOM)
+        run: |
+          sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+          swapon --show
+
       - name: Clone ImmortalWrt source code to /workdir (branch selectable)
         working-directory: /workdir
         run: |
@@ -68,27 +72,24 @@ jobs:
           if [ -z "$BRANCH" ]; then BRANCH="openwrt-23.05"; fi
           echo "Cloning branch: $BRANCH"
 
-          git clone -b "$BRANCH" --depth=1 https://github.com/immortalwrt/immortalwrt.git openwrt
-          ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+          git clone -b "$BRANCH" --depth=1 https://github.com/immortalwrt/immortalwrt.git immortalwrt
+          ln -sf /workdir/immortalwrt $GITHUB_WORKSPACE/immortalwrt
 
-          echo "IMMORTALWRT_DIR=$GITHUB_WORKSPACE/openwrt" >> $GITHUB_ENV
+          echo "IMMORTALWRT_DIR=$GITHUB_WORKSPACE/immortalwrt" >> $GITHUB_ENV
           echo "IMMORTALWRT_BRANCH=$BRANCH" >> $GITHUB_ENV
 
-          cd $GITHUB_WORKSPACE/openwrt
-          echo "Branch check:"
+          cd $GITHUB_WORKSPACE/immortalwrt
           git branch --show-current
           git log -1 --oneline
           df -hT .
 
       - name: Update feeds
         working-directory: ${{ env.IMMORTALWRT_DIR }}
-        run: |
-          ./scripts/feeds update -a
+        run: ./scripts/feeds update -a
 
       - name: Install feeds
         working-directory: ${{ env.IMMORTALWRT_DIR }}
-        run: |
-          ./scripts/feeds install -a
+        run: ./scripts/feeds install -a
 
       - name: Apply DIY script (optional)
         working-directory: ${{ env.IMMORTALWRT_DIR }}
@@ -100,7 +101,7 @@ jobs:
             echo "No scripts/diy.sh found, skipping."
           fi
 
-      - name: Load config (rootfs size fixed in config file)
+      - name: Load config
         working-directory: ${{ env.IMMORTALWRT_DIR }}
         run: |
           cp ../config/immortalwrt-x86_64-rootfs2g.config .config
@@ -115,56 +116,91 @@ jobs:
           find dl -size -1024c -exec ls -l {} \; || true
           find dl -size -1024c -exec rm -f {} \; || true
 
-      # 编译：先并行，失败自动降级（P3TERX 风格）
-      - name: Compile firmware
+      # 编译：限制并发（更稳），同时 tee 日志，避免 GitHub 截断看不到错误
+      - name: Compile firmware (capture log + fallback)
         id: compile
         working-directory: ${{ env.IMMORTALWRT_DIR }}
         run: |
-          echo -e "$(nproc) thread compile"
           set +e
-          make -j$(nproc)
-          RET=$?
+          echo "nproc=$(nproc)"
+          df -h
+          free -h
+
+          # 限制并发，避免 OOM（你也可以改成 4）
+          JOBS=$(nproc)
+          if [ "$JOBS" -gt 8 ]; then JOBS=8; fi
+          echo "Using -j$JOBS"
+
+          make -j$JOBS 2>&1 | tee build.log
+          RET=${PIPESTATUS[0]}
+
           if [ $RET -ne 0 ]; then
-            echo "Parallel build failed, retry with -j1"
-            make -j1
-            RET=$?
+            echo "Parallel build failed (code=$RET), retry with -j1"
+            make -j1 2>&1 | tee -a build.log
+            RET=${PIPESTATUS[0]}
           fi
+
           if [ $RET -ne 0 ]; then
             echo "Retry with -j1 V=s"
-            make -j1 V=s
-            RET=$?
+            make -j1 V=s 2>&1 | tee -a build.log
+            RET=${PIPESTATUS[0]}
           fi
-          set -e
+
           if [ $RET -ne 0 ]; then
-            echo "Build failed."
+            echo "===== LAST 200 LINES OF build.log ====="
+            tail -n 200 build.log || true
+            echo "===== df -h ====="
+            df -h || true
+            echo "===== free -h ====="
+            free -h || true
             exit $RET
           fi
+
           echo "status=success" >> $GITHUB_OUTPUT
 
-      - name: Check space usage
-        if: (!cancelled())
-        run: df -hT
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ env.IMMORTALWRT_BRANCH }}
+          path: ${{ env.IMMORTALWRT_DIR }}/build.log
 
-      - name: Organize firmware output (targets only)
+      # 组织 targets 输出（不用脆弱的 * 通配符）
+      - name: Organize firmware output (robust)
         id: organize
         if: steps.compile.outputs.status == 'success' && !cancelled()
         run: |
-          cd "${{ env.IMMORTALWRT_DIR }}/bin/targets/"*/*
+          set -e
+          BASE="${{ env.IMMORTALWRT_DIR }}/bin/targets"
+          echo "Targets base: $BASE"
+
+          if [ ! -d "$BASE" ]; then
+            echo "ERROR: $BASE does not exist."
+            ls -lah "${{ env.IMMORTALWRT_DIR }}/bin" || true
+            exit 2
+          fi
+
+          FIRMWARE_DIR="$(find "$BASE" -mindepth 2 -maxdepth 2 -type d | head -n 1)"
+          if [ -z "$FIRMWARE_DIR" ]; then
+            echo "ERROR: No firmware directory found under $BASE"
+            find "$BASE" -maxdepth 3 -type d -print || true
+            exit 2
+          fi
+
+          cd "$FIRMWARE_DIR"
           rm -rf packages || true
           echo "FIRMWARE_DIR=$PWD" >> $GITHUB_ENV
           echo "status=success" >> $GITHUB_OUTPUT
           echo "Firmware dir: $PWD"
           ls -lah
 
-      # 保底：上传 targets 产物到 Artifacts
-      - name: Upload firmware artifacts
+      - name: Upload firmware artifacts (targets only)
         if: steps.organize.outputs.status == 'success' && !cancelled()
         uses: actions/upload-artifact@v4
         with:
           name: immortalwrt-${{ env.IMMORTALWRT_BRANCH }}-x86_64-rootfs2g
           path: ${{ env.FIRMWARE_DIR }}
 
-      # 生成 Release tag
       - name: Generate release tag
         id: tag
         if: steps.organize.outputs.status == 'success' && !cancelled()
@@ -173,7 +209,6 @@ jobs:
           echo "RELEASE_NAME=ImmortalWrt-${{ env.IMMORTALWRT_BRANCH }}-x86_64-rootfs2g" >> $GITHUB_ENV
           echo "status=success" >> $GITHUB_OUTPUT
 
-      # 创建 Release + 上传固件
       - name: Create GitHub Release and upload firmware
         if: steps.tag.outputs.status == 'success' && !cancelled()
         uses: softprops/action-gh-release@v2
@@ -186,17 +221,10 @@ jobs:
             Branch: ${{ env.IMMORTALWRT_BRANCH }}
             rootfs: 2G (2048MB)
             Includes: LuCI(https), HomeProxy(sing-box), DDNS, Docker/Dockerman
-            Note: Docker data-root should be moved to external disk after install.
+            Note: Mount external disk to /overlay or /mnt/data after install for storage.
           files: |
             ${{ env.FIRMWARE_DIR }}/*
 
-      # （可选）把 config 也作为附件传上去，方便回溯
-      - name: Upload build config (optional)
-        if: steps.tag.outputs.status == 'success' && !cancelled()
-        uses: softprops/action-gh-release@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          files: |
-            ${{ github.workspace }}/config/immortalwrt-x86_64-rootfs2g.config
+      - name: Check space usage
+        if: (!cancelled())
+        run: df -hT
