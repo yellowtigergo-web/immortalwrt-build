@@ -12,11 +12,11 @@ on:
           - openwrt-23.05
           - master
 
-  push:
-    paths:
-      - ".github/workflows/build.yml"
-      - "config/**"
-      - "scripts/**"
+#  push:
+#    paths:
+#      - ".github/workflows/build.yml"
+#      - "config/**"
+#      - "scripts/**"
 
 jobs:
   build:
