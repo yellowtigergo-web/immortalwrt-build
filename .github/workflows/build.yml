@@ -102,6 +102,9 @@ jobs:
           cp "$GITHUB_WORKSPACE/${{ env.CONFIG_FILE }}" .config
           make defconfig
 
+          echo "===== VERSION fields in .config ====="
+          egrep '^(CONFIG_VERSION_NUMBER|CONFIG_VERSION_DIST|CONFIG_VERSION_CODE)=' .config || true
+
           echo "===== Key config lines ====="
           egrep "ROOTFS_PARTSIZE|luci|nginx|homeproxy|sing-box|ddns|docker|dockerman" .config || true
 
@@ -149,7 +152,7 @@ jobs:
           path: ${{ env.IMMORTALWRT_DIR }}/build.log
           if-no-files-found: ignore
 
-      - name: Organize firmware output (use VERSION_NUMBER in filenames)
+      - name: Organize firmware output (use CONFIG_VERSION_NUMBER in filenames)
         id: organize
         if: steps.compile.outputs.status == 'success' && !cancelled()
         run: |
@@ -173,16 +176,16 @@ jobs:
           rm -rf packages || true
 
           # -------------------------------------------------
-          # Get semantic version like 23.05.3 from include/version.mk
+          # Get semantic version like 23.05.3 from .config
           # -------------------------------------------------
-          VER_FILE="${{ env.IMMORTALWRT_DIR }}/include/version.mk"
+          CFG="${{ env.IMMORTALWRT_DIR }}/.config"
           VERSION=""
 
-          if [ -f "$VER_FILE" ]; then
-            VERSION="$(sed -n 's/^VERSION_NUMBER:=//p' "$VER_FILE" | head -n 1 | tr -d ' \n')"
+          if [ -f "$CFG" ]; then
+            VERSION="$(sed -n 's/^CONFIG_VERSION_NUMBER="\([^"]\+\)".*/\1/p' "$CFG" | head -n 1 | tr -d ' \n')"
           fi
 
-          # Fallback: use version.buildinfo if VERSION_NUMBER not found
+          # fallback if not found
           if [ -z "$VERSION" ] && [ -f version.buildinfo ]; then
             VERSION="$(cat version.buildinfo | tr -d ' \n')"
           fi
@@ -191,20 +194,26 @@ jobs:
             VERSION="unknown"
           fi
 
-          echo "Detected VERSION for filename: $VERSION"
+          echo "Detected semantic VERSION for filename: $VERSION"
 
           # -------------------------------------------------
-          # Rename major artifacts by adding semantic version prefix
+          # Rename major artifacts:
+          # immortalwrt-x86-64-... -> immortalwrt-23.05.3-x86-64-...
           # -------------------------------------------------
           for f in *.img.gz *.bin *.tar.gz; do
             [ -e "$f" ] || continue
 
-            # already renamed?
+            # already renamed to immortalwrt-<VERSION>-...
             if echo "$f" | grep -q "^immortalwrt-$VERSION-"; then
               continue
             fi
 
-            mv "$f" "immortalwrt-$VERSION-$f"
+            if echo "$f" | grep -q "^immortalwrt-"; then
+              rest="${f#immortalwrt-}"
+              mv "$f" "immortalwrt-$VERSION-$rest"
+            else
+              mv "$f" "immortalwrt-$VERSION-$f"
+            fi
           done
 
           # Regenerate sha256sums after renaming
@@ -243,7 +252,7 @@ jobs:
           body: |
             Branch: ${{ env.IMMORTALWRT_BRANCH }}
             rootfs: 2G (2048MB)
-            Filename prefix: VERSION_NUMBER from include/version.mk (e.g. 23.05.3)
+            Filename: use CONFIG_VERSION_NUMBER from .config (e.g. 23.05.3)
             HTTPS: luci-ssl-nginx
             Includes: HomeProxy(sing-box), DDNS, Docker/Dockerman
           files: |
