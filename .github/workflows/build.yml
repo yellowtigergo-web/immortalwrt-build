@@ -94,7 +94,9 @@ jobs:
           echo "IMMORTALWRT_DIR=${{ env.IMMORTALWRT_DIR }}"
           echo "CONFIG_FILE=${{ env.CONFIG_FILE }}"
 
+          echo "=== list config dir (normal) ==="
           ls -lah "$GITHUB_WORKSPACE/config" || true
+          echo "=== list config dir (show hidden chars) ==="
           ls -lb  "$GITHUB_WORKSPACE/config" || true
 
           cp "$GITHUB_WORKSPACE/${{ env.CONFIG_FILE }}" .config
@@ -147,13 +149,13 @@ jobs:
           path: ${{ env.IMMORTALWRT_DIR }}/build.log
           if-no-files-found: ignore
 
-      - name: Organize firmware output (add version to filenames)
+      - name: Organize firmware output (use VERSION_NUMBER in filenames)
         id: organize
         if: steps.compile.outputs.status == 'success' && !cancelled()
         run: |
           set -e
-          BASE="${{ env.IMMORTALWRT_DIR }}/bin/targets"
 
+          BASE="${{ env.IMMORTALWRT_DIR }}/bin/targets"
           if [ ! -d "$BASE" ]; then
             echo "ERROR: $BASE does not exist."
             ls -lah "${{ env.IMMORTALWRT_DIR }}/bin" || true
@@ -170,20 +172,38 @@ jobs:
           cd "$FIRMWARE_DIR"
           rm -rf packages || true
 
-          # Read version from version.buildinfo
-          if [ -f version.buildinfo ]; then
+          # -------------------------------------------------
+          # Get semantic version like 23.05.3 from include/version.mk
+          # -------------------------------------------------
+          VER_FILE="${{ env.IMMORTALWRT_DIR }}/include/version.mk"
+          VERSION=""
+
+          if [ -f "$VER_FILE" ]; then
+            VERSION="$(sed -n 's/^VERSION_NUMBER:=//p' "$VER_FILE" | head -n 1 | tr -d ' \n')"
+          fi
+
+          # Fallback: use version.buildinfo if VERSION_NUMBER not found
+          if [ -z "$VERSION" ] && [ -f version.buildinfo ]; then
             VERSION="$(cat version.buildinfo | tr -d ' \n')"
-          else
+          fi
+
+          if [ -z "$VERSION" ]; then
             VERSION="unknown"
           fi
-          echo "Detected version: $VERSION"
 
-          # Add version prefix to major artifacts
+          echo "Detected VERSION for filename: $VERSION"
+
+          # -------------------------------------------------
+          # Rename major artifacts by adding semantic version prefix
+          # -------------------------------------------------
           for f in *.img.gz *.bin *.tar.gz; do
             [ -e "$f" ] || continue
+
+            # already renamed?
             if echo "$f" | grep -q "^immortalwrt-$VERSION-"; then
               continue
             fi
+
             mv "$f" "immortalwrt-$VERSION-$f"
           done
 
@@ -223,7 +243,7 @@ jobs:
           body: |
             Branch: ${{ env.IMMORTALWRT_BRANCH }}
             rootfs: 2G (2048MB)
-            Naming: add version prefix from version.buildinfo
+            Filename prefix: VERSION_NUMBER from include/version.mk (e.g. 23.05.3)
             HTTPS: luci-ssl-nginx
             Includes: HomeProxy(sing-box), DDNS, Docker/Dockerman
           files: |
