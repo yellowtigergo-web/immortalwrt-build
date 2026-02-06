@@ -85,7 +85,7 @@ jobs:
         working-directory: ${{ env.IMMORTALWRT_DIR }}
         run: ./scripts/feeds install -a
 
-      - name: Load config (absolute path + self-check)
+      - name: Load config (absolute path + defconfig)
         working-directory: ${{ env.IMMORTALWRT_DIR }}
         run: |
           set -e
@@ -94,19 +94,11 @@ jobs:
           echo "IMMORTALWRT_DIR=${{ env.IMMORTALWRT_DIR }}"
           echo "CONFIG_FILE=${{ env.CONFIG_FILE }}"
 
-          echo "=== list config dir (normal) ==="
           ls -lah "$GITHUB_WORKSPACE/config" || true
-          echo "=== list config dir (show hidden chars) ==="
           ls -lb  "$GITHUB_WORKSPACE/config" || true
 
           cp "$GITHUB_WORKSPACE/${{ env.CONFIG_FILE }}" .config
           make defconfig
-
-          echo "===== VERSION fields in .config ====="
-          egrep '^(CONFIG_VERSION_NUMBER|CONFIG_VERSION_DIST|CONFIG_VERSION_CODE)=' .config || true
-
-          echo "===== Key config lines ====="
-          egrep "ROOTFS_PARTSIZE|luci|nginx|homeproxy|sing-box|ddns|docker|dockerman" .config || true
 
       - name: Download package sources
         working-directory: ${{ env.IMMORTALWRT_DIR }}
@@ -152,19 +144,24 @@ jobs:
           path: ${{ env.IMMORTALWRT_DIR }}/build.log
           if-no-files-found: ignore
 
-      - name: Organize firmware output (use CONFIG_VERSION_NUMBER in filenames)
+      - name: Organize firmware output (prefix 23.05 extracted from IMMORTALWRT_BRANCH)
         id: organize
         if: steps.compile.outputs.status == 'success' && !cancelled()
+        working-directory: ${{ env.IMMORTALWRT_DIR }}
         run: |
           set -e
 
-          BASE="${{ env.IMMORTALWRT_DIR }}/bin/targets"
-          if [ ! -d "$BASE" ]; then
-            echo "ERROR: $BASE does not exist."
-            ls -lah "${{ env.IMMORTALWRT_DIR }}/bin" || true
-            exit 2
+          # Extract short version from branch name:
+          # openwrt-23.05 -> 23.05
+          # master -> master
+          BR="${{ env.IMMORTALWRT_BRANCH }}"
+          SHORT_VER="$(echo "$BR" | sed -E 's/^openwrt-//')"
+          if [ -z "$SHORT_VER" ]; then
+            SHORT_VER="unknown"
           fi
+          echo "SHORT_VER for filenames: $SHORT_VER"
 
+          BASE="${{ env.IMMORTALWRT_DIR }}/bin/targets"
           FIRMWARE_DIR="$(find "$BASE" -mindepth 2 -maxdepth 2 -type d | head -n 1)"
           if [ -z "$FIRMWARE_DIR" ]; then
             echo "ERROR: No firmware directory found under $BASE"
@@ -175,44 +172,21 @@ jobs:
           cd "$FIRMWARE_DIR"
           rm -rf packages || true
 
-          # -------------------------------------------------
-          # Get semantic version like 23.05.3 from .config
-          # -------------------------------------------------
-          CFG="${{ env.IMMORTALWRT_DIR }}/.config"
-          VERSION=""
-
-          if [ -f "$CFG" ]; then
-            VERSION="$(sed -n 's/^CONFIG_VERSION_NUMBER="\([^"]\+\)".*/\1/p' "$CFG" | head -n 1 | tr -d ' \n')"
-          fi
-
-          # fallback if not found
-          if [ -z "$VERSION" ] && [ -f version.buildinfo ]; then
-            VERSION="$(cat version.buildinfo | tr -d ' \n')"
-          fi
-
-          if [ -z "$VERSION" ]; then
-            VERSION="unknown"
-          fi
-
-          echo "Detected semantic VERSION for filename: $VERSION"
-
-          # -------------------------------------------------
           # Rename major artifacts:
-          # immortalwrt-x86-64-... -> immortalwrt-23.05.3-x86-64-...
-          # -------------------------------------------------
+          # immortalwrt-x86-64-... -> immortalwrt-23.05-x86-64-...
           for f in *.img.gz *.bin *.tar.gz; do
             [ -e "$f" ] || continue
 
-            # already renamed to immortalwrt-<VERSION>-...
-            if echo "$f" | grep -q "^immortalwrt-$VERSION-"; then
+            # already renamed to immortalwrt-<SHORT_VER>-...
+            if echo "$f" | grep -q "^immortalwrt-$SHORT_VER-"; then
               continue
             fi
 
             if echo "$f" | grep -q "^immortalwrt-"; then
               rest="${f#immortalwrt-}"
-              mv "$f" "immortalwrt-$VERSION-$rest"
+              mv "$f" "immortalwrt-$SHORT_VER-$rest"
             else
-              mv "$f" "immortalwrt-$VERSION-$f"
+              mv "$f" "immortalwrt-$SHORT_VER-$f"
             fi
           done
 
@@ -237,8 +211,7 @@ jobs:
         id: tag
         if: steps.organize.outputs.status == 'success' && !cancelled()
         run: |
-          echo "RELEASE_TAG=$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
-          echo "RELEASE_NAME=ImmortalWrt-${{ env.IMMORTALWRT_BRANCH }}-x86_64-rootfs2g" >> $GITHUB_ENV
+          echo "release_tag=$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_OUTPUT
           echo "status=success" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release and upload firmware
@@ -247,13 +220,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          name: ${{ env.RELEASE_NAME }} ${{ env.RELEASE_TAG }}
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          name: ImmortalWrt-${{ env.IMMORTALWRT_BRANCH }}-x86_64-rootfs2g ${{ steps.tag.outputs.release_tag }}
           body: |
             Branch: ${{ env.IMMORTALWRT_BRANCH }}
+            Filename prefix: extracted from IMMORTALWRT_BRANCH (openwrt-23.05 -> 23.05)
             rootfs: 2G (2048MB)
-            Filename: use CONFIG_VERSION_NUMBER from .config (e.g. 23.05.3)
-            HTTPS: luci-ssl-nginx
-            Includes: HomeProxy(sing-box), DDNS, Docker/Dockerman
           files: |
             ${{ env.FIRMWARE_DIR }}/*
