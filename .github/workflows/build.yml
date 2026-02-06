@@ -20,6 +20,7 @@ jobs:
             echo "ERROR: build.env not found in repo root."
             exit 1
           fi
+
           echo "=== build.env ==="
           cat "$GITHUB_WORKSPACE/build.env"
 
@@ -93,16 +94,11 @@ jobs:
           echo "IMMORTALWRT_DIR=${{ env.IMMORTALWRT_DIR }}"
           echo "CONFIG_FILE=${{ env.CONFIG_FILE }}"
 
-          echo "=== list config dir (normal) ==="
           ls -lah "$GITHUB_WORKSPACE/config" || true
-          echo "=== list config dir (show hidden chars) ==="
-          ls -lb "$GITHUB_WORKSPACE/config" || true
+          ls -lb  "$GITHUB_WORKSPACE/config" || true
 
           cp "$GITHUB_WORKSPACE/${{ env.CONFIG_FILE }}" .config
           make defconfig
-
-          echo "===== Sanity check: make sure no libustream variants are selected ====="
-          grep -E "CONFIG_PACKAGE_libustream" .config || true
 
           echo "===== Key config lines ====="
           egrep "ROOTFS_PARTSIZE|luci|nginx|homeproxy|sing-box|ddns|docker|dockerman" .config || true
@@ -151,12 +147,13 @@ jobs:
           path: ${{ env.IMMORTALWRT_DIR }}/build.log
           if-no-files-found: ignore
 
-      - name: Organize firmware output (robust)
+      - name: Organize firmware output (add version to filenames)
         id: organize
         if: steps.compile.outputs.status == 'success' && !cancelled()
         run: |
           set -e
           BASE="${{ env.IMMORTALWRT_DIR }}/bin/targets"
+
           if [ ! -d "$BASE" ]; then
             echo "ERROR: $BASE does not exist."
             ls -lah "${{ env.IMMORTALWRT_DIR }}/bin" || true
@@ -172,9 +169,33 @@ jobs:
 
           cd "$FIRMWARE_DIR"
           rm -rf packages || true
+
+          # Read version from version.buildinfo
+          if [ -f version.buildinfo ]; then
+            VERSION="$(cat version.buildinfo | tr -d ' \n')"
+          else
+            VERSION="unknown"
+          fi
+          echo "Detected version: $VERSION"
+
+          # Add version prefix to major artifacts
+          for f in *.img.gz *.bin *.tar.gz; do
+            [ -e "$f" ] || continue
+            if echo "$f" | grep -q "^immortalwrt-$VERSION-"; then
+              continue
+            fi
+            mv "$f" "immortalwrt-$VERSION-$f"
+          done
+
+          # Regenerate sha256sums after renaming
+          rm -f sha256sums || true
+          sha256sum * > sha256sums
+
+          echo "=== Final firmware files ==="
+          ls -lah
+
           echo "FIRMWARE_DIR=$PWD" >> $GITHUB_ENV
           echo "status=success" >> $GITHUB_OUTPUT
-          ls -lah
 
       - name: Upload firmware artifacts (targets only)
         if: steps.organize.outputs.status == 'success' && !cancelled()
@@ -202,7 +223,8 @@ jobs:
           body: |
             Branch: ${{ env.IMMORTALWRT_BRANCH }}
             rootfs: 2G (2048MB)
-            HTTPS: luci-ssl-nginx (avoid libustream openssl/mbedtls clash)
+            Naming: add version prefix from version.buildinfo
+            HTTPS: luci-ssl-nginx
             Includes: HomeProxy(sing-box), DDNS, Docker/Dockerman
           files: |
             ${{ env.FIRMWARE_DIR }}/*
