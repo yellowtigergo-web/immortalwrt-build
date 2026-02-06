@@ -1,4 +1,4 @@
-name: Build ImmortalWrt (x86_64 rootfs2G + homeproxy/ddns/docker) + Release
+name: Build ImmortalWrt (x86_64 rootfs2G + luci-ssl-nginx + homeproxy/ddns/docker) + Release
 
 on:
   workflow_dispatch:
@@ -6,7 +6,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-
     permissions:
       contents: write
 
@@ -21,23 +20,16 @@ jobs:
             echo "ERROR: build.env not found in repo root."
             exit 1
           fi
-
           echo "=== build.env ==="
           cat "$GITHUB_WORKSPACE/build.env"
 
-          # 导入变量
           set -a
           source "$GITHUB_WORKSPACE/build.env"
           set +a
 
-          # 写入 GITHUB_ENV 供后续 steps 使用
           echo "IMMORTALWRT_REPO=$IMMORTALWRT_REPO" >> $GITHUB_ENV
           echo "IMMORTALWRT_BRANCH=$IMMORTALWRT_BRANCH" >> $GITHUB_ENV
           echo "CONFIG_FILE=$CONFIG_FILE" >> $GITHUB_ENV
-
-          echo "Repo:   $IMMORTALWRT_REPO"
-          echo "Branch: $IMMORTALWRT_BRANCH"
-          echo "Config: $CONFIG_FILE"
 
       - name: Initialization environment (P3TERX style)
         env:
@@ -77,7 +69,6 @@ jobs:
           echo "Cloning: $IMMORTALWRT_REPO  branch=$IMMORTALWRT_BRANCH"
           git clone -b "$IMMORTALWRT_BRANCH" --depth=1 "$IMMORTALWRT_REPO" immortalwrt
           ln -sf /workdir/immortalwrt "$GITHUB_WORKSPACE/immortalwrt"
-
           echo "IMMORTALWRT_DIR=$GITHUB_WORKSPACE/immortalwrt" >> $GITHUB_ENV
 
           cd "$GITHUB_WORKSPACE/immortalwrt"
@@ -102,21 +93,19 @@ jobs:
           echo "IMMORTALWRT_DIR=${{ env.IMMORTALWRT_DIR }}"
           echo "CONFIG_FILE=${{ env.CONFIG_FILE }}"
 
-          echo "=== list workspace root ==="
-          ls -lah "$GITHUB_WORKSPACE" || true
-
           echo "=== list config dir (normal) ==="
           ls -lah "$GITHUB_WORKSPACE/config" || true
-
           echo "=== list config dir (show hidden chars) ==="
           ls -lb "$GITHUB_WORKSPACE/config" || true
 
-          # 关键：用绝对路径复制，不再依赖 ../
           cp "$GITHUB_WORKSPACE/${{ env.CONFIG_FILE }}" .config
-
           make defconfig
+
+          echo "===== Sanity check: make sure no libustream variants are selected ====="
+          grep -E "CONFIG_PACKAGE_libustream" .config || true
+
           echo "===== Key config lines ====="
-          egrep "TARGET_|ROOTFS_PARTSIZE|homeproxy|sing-box|ddns|docker|dockerman|firewall4|nftables|kmod-tun" .config || true
+          egrep "ROOTFS_PARTSIZE|luci|nginx|homeproxy|sing-box|ddns|docker|dockerman" .config || true
 
       - name: Download package sources
         working-directory: ${{ env.IMMORTALWRT_DIR }}
@@ -149,10 +138,6 @@ jobs:
           if [ $RET -ne 0 ]; then
             echo "===== LAST 200 LINES OF build.log ====="
             tail -n 200 build.log || true
-            echo "===== df -h ====="
-            df -h || true
-            echo "===== free -h ====="
-            free -h || true
             exit $RET
           fi
 
@@ -172,8 +157,6 @@ jobs:
         run: |
           set -e
           BASE="${{ env.IMMORTALWRT_DIR }}/bin/targets"
-          echo "Targets base: $BASE"
-
           if [ ! -d "$BASE" ]; then
             echo "ERROR: $BASE does not exist."
             ls -lah "${{ env.IMMORTALWRT_DIR }}/bin" || true
@@ -191,7 +174,6 @@ jobs:
           rm -rf packages || true
           echo "FIRMWARE_DIR=$PWD" >> $GITHUB_ENV
           echo "status=success" >> $GITHUB_OUTPUT
-          echo "Firmware dir: $PWD"
           ls -lah
 
       - name: Upload firmware artifacts (targets only)
@@ -220,6 +202,7 @@ jobs:
           body: |
             Branch: ${{ env.IMMORTALWRT_BRANCH }}
             rootfs: 2G (2048MB)
-            Includes: LuCI(https), HomeProxy(sing-box), DDNS, Docker/Dockerman
+            HTTPS: luci-ssl-nginx (avoid libustream openssl/mbedtls clash)
+            Includes: HomeProxy(sing-box), DDNS, Docker/Dockerman
           files: |
             ${{ env.FIRMWARE_DIR }}/*
